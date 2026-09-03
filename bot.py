@@ -90,7 +90,7 @@ from worksheet_generator import (
 
 try:
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     _TESSERACT_CMD = os.environ.get("TESSERACT_CMD", "")
     if _TESSERACT_CMD:
@@ -129,6 +129,28 @@ class RecognitionError(RuntimeError):
 # OCR фото (Tesseract — классический движок, не нейросеть/LLM)
 # --------------------------------------------------------------------------- #
 
+OCR_MAX_SIDE = 2200      # верхний предел стороны после апскейла, px
+OCR_MIN_UPSCALE_SIDE = 1600  # если фото меньше — увеличиваем
+
+
+def _preprocess_for_ocr(image: "Image.Image") -> "Image.Image":
+    """Убираем альфа-канал, переводим в градации серого, увеличиваем мелкие
+    фото и повышаем контраст — Tesseract на таких фото ошибается заметно
+    меньше, особенно на телефонных снимках учебника/тетради."""
+    if image.mode not in ("L", "RGB"):
+        image = image.convert("RGB")
+    gray = ImageOps.grayscale(image)
+
+    w, h = gray.size
+    longest = max(w, h)
+    if longest < OCR_MIN_UPSCALE_SIDE:
+        scale = min(4, max(2, OCR_MAX_SIDE // max(longest, 1)))
+        gray = gray.resize((w * scale, h * scale), Image.LANCZOS)
+
+    gray = ImageOps.autocontrast(gray)
+    return gray
+
+
 def ocr_image(image_bytes: bytes) -> str:
     if pytesseract is None or Image is None:
         raise RecognitionError(
@@ -138,7 +160,11 @@ def ocr_image(image_bytes: bytes) -> str:
         )
     try:
         image = Image.open(BytesIO(image_bytes))
-        text = pytesseract.image_to_string(image, lang=OCR_LANG)
+        image = _preprocess_for_ocr(image)
+        # psm 6 = «единый блок текста» — на структурированных заданиях (в т.ч.
+        # с несколькими пунктами в строку) даёт более предсказуемый порядок
+        # строк, чем автоматический разбор колонок/блоков (psm 3 по умолчанию).
+        text = pytesseract.image_to_string(image, lang=OCR_LANG, config="--psm 6")
     except pytesseract.TesseractNotFoundError as e:
         raise RecognitionError(
             "Tesseract OCR не найден в системе. Установите его (см. инструкцию "
@@ -180,11 +206,16 @@ _PLAIN_NUMBER_RE = re.compile(r'^[+\-]?\d+([.,]\d+)?$')
 
 
 def _strip_edges(word: str):
-    """Отделяет обрамляющую пунктуацию от 'ядра' слова. Закрывающую скобку
-    ')' не срезает, если внутри ядра остаётся непарная открывающая '(' —
-    иначе ломается sqrt(...)."""
+    """Отделяет обрамляющую пунктуацию от 'ядра' слова. Скобки не срезает,
+    если они образуют парную пару внутри самого слова (например, «(-5,9)3»
+    или «sqrt(2)») — иначе ломается математическое выражение целиком."""
     lead_end = 0
     while lead_end < len(word) and word[lead_end] in _LEAD_CHARS:
+        ch = word[lead_end]
+        if ch == "(":
+            candidate = word[lead_end + 1:]
+            if candidate.count(")") > candidate.count("("):
+                break  # эта '(' закрывается позже в этом же слове — не срезаем
         lead_end += 1
 
     trail_start = len(word)

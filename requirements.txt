@@ -2,3 +2,5 @@ python-telegram-bot>=20,<22
 matplotlib
 reportlab
 python-dotenv
+pytesseract
+Pillow

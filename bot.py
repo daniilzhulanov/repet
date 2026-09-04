@@ -330,12 +330,24 @@ def recognize_text_task(text: str) -> str:
 
 def _hw(context: ContextTypes.DEFAULT_TYPE) -> dict:
     if "hw" not in context.user_data:
-        context.user_data["hw"] = {"state": None, "tasks": [], "edit_index": None}
+        context.user_data["hw"] = {
+            "state": None,
+            "tasks": [],
+            "edit_index": None,
+            "heading": DEFAULT_HEADING,
+            "spacing": DEFAULT_SPACE_CM
+        }
     return context.user_data["hw"]
 
 
 def _reset_hw(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data["hw"] = {"state": None, "tasks": [], "edit_index": None}
+    context.user_data["hw"] = {
+        "state": None,
+        "tasks": [],
+        "edit_index": None,
+        "heading": DEFAULT_HEADING,
+        "spacing": DEFAULT_SPACE_CM
+    }
 
 
 def _preview(text: str, length: int = PREVIEW_LEN) -> str:
@@ -358,18 +370,24 @@ def _review_keyboard(n_tasks: int) -> InlineKeyboardMarkup:
         for i in range(n_tasks)
     ]
     rows.append([InlineKeyboardButton("➕ Добавить ещё задание", callback_data="add_more")])
+    rows.append([InlineKeyboardButton("📝 Изменить заголовок", callback_data="edit_heading")])
+    rows.append([InlineKeyboardButton("📏 Изменить свободное место", callback_data="edit_spacing")])
     rows.append([InlineKeyboardButton("✅ Подтвердить и получить файлы", callback_data="confirm_all")])
     rows.append([InlineKeyboardButton("❌ Отменить", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
 
-def _review_text(tasks: list[str]) -> str:
-    lines = ["Вот что удалось распознать:\n"]
+def _review_text(tasks: list[str], heading: str, spacing: float) -> str:
+    lines = [
+        f"<b>Заголовок:</b> {heading}",
+        f"<b>Свободное место:</b> {spacing} см\n",
+        "Вот что удалось распознать:\n"
+    ]
     for i, body in enumerate(tasks, start=1):
         lines.append(f"<b>Задание {i}.</b> {_preview(body)}")
     lines.append(
-        "\nМожно отредактировать любое задание, добавить ещё одно или "
-        "подтвердить и получить .md и .pdf."
+        "\nМожно отредактировать любое задание, изменить заголовок/отступы, добавить ещё одно или "
+        "подтвердить и получить файлы."
     )
     return "\n".join(lines)
 
@@ -385,28 +403,36 @@ def build_md_from_tasks(tasks: list[str], heading: str = DEFAULT_HEADING) -> str
     return "\n".join(parts)
 
 
-async def _send_result_files(update: Update, context: ContextTypes.DEFAULT_TYPE, tasks: list[str]) -> None:
+async def _send_result_files(update: Update, context: ContextTypes.DEFAULT_TYPE, hw: dict) -> None:
     chat_id = update.effective_chat.id
-    md_text = build_md_from_tasks(tasks)
+    tasks = hw["tasks"]
+    heading = hw["heading"]
+    spacing = hw["spacing"]
+    
+    md_text = build_md_from_tasks(tasks, heading)
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
 
+    safe_name = re.sub(r'[\\/*?:"<>|]', "", heading).strip()
+    if not safe_name:
+        safe_name = "domashka"
+
     with tempfile.TemporaryDirectory(prefix="worksheet_bot_") as tmp:
         tmp_dir = Path(tmp)
-        md_path = tmp_dir / "domashka.md"
-        pdf_path = tmp_dir / "domashka.pdf"
+        md_path = tmp_dir / f"{safe_name}.md"
+        pdf_path = tmp_dir / f"{safe_name}.pdf"
         md_path.write_text(md_text, encoding="utf-8")
 
         worksheet = parse_markdown(md_text)
-        n_pages = build_pdf(worksheet, pdf_path, mode=GENERATION_MODE, default_space=DEFAULT_SPACE_CM)
+        n_pages = build_pdf(worksheet, pdf_path, mode=GENERATION_MODE, default_space=spacing)
 
         with open(md_path, "rb") as f:
-            await context.bot.send_document(chat_id=chat_id, document=f, filename="domashka.md")
+            await context.bot.send_document(chat_id=chat_id, document=f, filename=f"{safe_name}.md")
         with open(pdf_path, "rb") as f:
             await context.bot.send_document(
                 chat_id=chat_id,
                 document=f,
-                filename="domashka.pdf",
+                filename=f"{safe_name}.pdf",
                 caption=f"Готово: {len(worksheet.tasks)} заданий, {n_pages} стр.",
             )
 
@@ -495,7 +521,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=_review_text(hw["tasks"]),
+            text=_review_text(hw["tasks"], hw["heading"], hw["spacing"]),
             reply_markup=_review_keyboard(len(hw["tasks"])),
             parse_mode="HTML",
         )
@@ -511,6 +537,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             chat_id=update.effective_chat.id,
             text="Пришлите ещё одно задание — текстом или фото.",
             reply_markup=_collecting_keyboard(),
+        )
+        return
+
+    if data == "edit_heading":
+        hw["state"] = "editing_heading"
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Текущий заголовок: {hw['heading']}\nПришлите новое название файла/заголовок.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_edit")]])
+        )
+        return
+
+    if data == "edit_spacing":
+        hw["state"] = "editing_spacing"
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Текущее свободное место под заданием: {hw['spacing']} см\nПришлите новое значение в сантиметрах (число, например 3 или 4.5).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="cancel_edit")]])
         )
         return
 
@@ -543,7 +595,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=_review_text(hw["tasks"]),
+            text=_review_text(hw["tasks"], hw["heading"], hw["spacing"]),
             reply_markup=_review_keyboard(len(hw["tasks"])),
             parse_mode="HTML",
         )
@@ -554,9 +606,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        tasks = hw["tasks"]
         try:
-            await _send_result_files(update, context, tasks)
+            await _send_result_files(update, context, hw)
         except Exception:
             logger.exception("Ошибка при генерации файлов")
             await context.bot.send_message(
@@ -580,6 +631,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     hw = _hw(context)
     state = hw["state"]
+
+    if state == "editing_heading":
+        hw["heading"] = update.message.text.strip()
+        hw["state"] = "reviewing"
+        await update.message.reply_text(
+            _review_text(hw["tasks"], hw["heading"], hw["spacing"]),
+            reply_markup=_review_keyboard(len(hw["tasks"])),
+            parse_mode="HTML",
+        )
+        return
+
+    if state == "editing_spacing":
+        try:
+            val = float(update.message.text.replace(',', '.'))
+            hw["spacing"] = val
+            hw["state"] = "reviewing"
+            await update.message.reply_text(
+                _review_text(hw["tasks"], hw["heading"], hw["spacing"]),
+                reply_markup=_review_keyboard(len(hw["tasks"])),
+                parse_mode="HTML",
+            )
+        except ValueError:
+            await update.message.reply_text("Пожалуйста, введите корректное число (например, 5 или 3.5).")
+        return
 
     if state not in ("collecting", "editing"):
         await handle_wrong_message(update, context)
@@ -636,7 +711,7 @@ async def _task_recognized(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         hw["edit_index"] = None
         await update.message.reply_text(f"Задание {idx + 1} обновлено.")
         await update.message.reply_text(
-            _review_text(hw["tasks"]),
+            _review_text(hw["tasks"], hw["heading"], hw["spacing"]),
             reply_markup=_review_keyboard(len(hw["tasks"])),
             parse_mode="HTML",
         )

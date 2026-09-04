@@ -5,6 +5,35 @@ bot.py
 ======
 
 Telegram-бот для сборки домашней работы и генерации PDF-«тетрадного листа».
+
+Два способа получить PDF:
+
+1) ИНТЕРАКТИВНЫЙ (основной сценарий)
+   -----------------------------------
+   /start -> кнопка «🆕 Новая домашка» -> бот просит прислать первое задание.
+   Задание можно прислать текстом ИЛИ фото (фото условия из учебника/тетради).
+   Бот распознаёт текст через OpenRouter API, оформляет его в LaTeX-подобном
+   виде ($...$, mathtext) и добавляет задание в список.
+   Когда всё добавлено — кнопка «✅ Завершить»: бот присылает список всех
+   распознанных заданий, каждое можно отредактировать или подтвердить.
+   После подтверждения бот генерирует и присылает .md файл и готовый .pdf.
+
+2) ЗАГРУЗКА ГОТОВОГО .md ФАЙЛА
+   ---------------------------
+   Можно прислать боту документом .md файл с заданиями — в ответ придёт PDF.
+
+НАСТРОЙКА
+---------
+1. Создайте бота через @BotFather в Telegram, получите токен.
+2. Получите API ключ OpenRouter: https://openrouter.ai/
+3. Установите Python-зависимости:
+       pip install -r requirements.txt
+4. Задайте переменные окружения в .env:
+       TELEGRAM_BOT_TOKEN=123456:ABC-your-token
+       OPENROUTER_API_KEY=sk-or-v1-...
+       OPENROUTER_MODEL=google/gemini-2.5-flash # или любая другая мультимодальная модель
+5. Запустите бота:
+       python3 bot.py
 """
 
 import base64
@@ -126,13 +155,18 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         )
         response.raise_for_status()
         data = response.json()
-
+        
         choices = data.get("choices", [])
         if not choices or not choices[0].get("message", {}).get("content"):
             raise RecognitionError("API OpenRouter вернул пустой ответ.")
 
         text = choices[0]["message"]["content"].strip()
-
+        
+        # Очистка форматирования
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+        text = text.replace("$$", "$")
+        
     except Exception as e:
         raise RecognitionError(f"Ошибка при обращении к OpenRouter API: {e}") from e
 
@@ -141,6 +175,16 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     return text
 
+def recognize_image_task(image_bytes: bytes) -> str:
+    raw_text = recognize_image_via_openrouter(image_bytes)
+    
+    # Больше НЕ вызываем heuristic_to_mathtext для результатов LLM, 
+    # чтобы предотвратить двойное оборачивание в доллары.
+    result = _clean_recognized(raw_text)
+    
+    if not result:
+        raise RecognitionError("Не удалось разобрать задание на фото.")
+    return result
 
 # --------------------------------------------------------------------------- #
 # Оформление формул в $...$ по регулярным выражениям
@@ -268,23 +312,10 @@ def heuristic_to_mathtext(text: str) -> str:
     return "".join(result)
 
 
-def clean_for_mathtext(text: str) -> str:
-    """Очищает текст от двойных долларов и исправляет непарные знаки."""
-    if not text:
-        return ""
-    text = text.replace("$$", "$")
-    text = re.sub(r"\$\s*\$", "", text)
-    text = re.sub(r"\$\s+", " $", text)
-    text = re.sub(r"\s+\$", "$ ", text)
-    return text.strip()
-
-
 def _clean_recognized(text: str) -> str:
     text = text.strip()
     text = LEADING_TASK_LABEL_RE.sub("", text).strip()
-    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text).strip()
-    return clean_for_mathtext(text)
+    return text
 
 
 def recognize_text_task(text: str) -> str:
@@ -296,7 +327,7 @@ def recognize_text_task(text: str) -> str:
 
 def recognize_image_task(image_bytes: bytes) -> str:
     raw_text = recognize_image_via_openrouter(image_bytes)
-    result = _clean_recognized(raw_text)
+    result = _clean_recognized(heuristic_to_mathtext(raw_text))
     if not result:
         raise RecognitionError("Не удалось разобрать задание на фото.")
     return result

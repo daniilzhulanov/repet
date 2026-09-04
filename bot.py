@@ -109,6 +109,21 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         "Content-Type": "application/json",
     }
 
+    prompt = (
+        "Распознай текст и математические задания с изображения.\n\n"
+        "ВАЖНОЕ ТРЕБОВАНИЕ К ФОРМАТИРОВАНИЮ:\n"
+        "Результат будет рендериться через Python Matplotlib (mathtext).\n"
+        "1. Распознай весь текст и буквы пунктов (а, б, в, г и т.д.).\n"
+        "2. Все математические выражения, числа со степенями, скобки с числами оборачивай в $...$.\n"
+        "3. Используй ТОЛЬКО базовый LaTeX-синтаксис, совместимый с Python mathtext:\n"
+        "   - Степени: $71^2$, $(-5,9)^3$, $x^{12}$\n"
+        "   - Дроби: $\\frac{a}{b}$\n"
+        "   - Умножение: \\cdot вместо *\n"
+        "   - Корни: \\sqrt{x}\n"
+        "4. НЕ ИСПОЛЬЗУЙ сложные окружения LaTeX (такие как \\begin{align}, \\begin{matrix}, \\begin{array}).\n"
+        "5. Верни ТОЛЬКО готовый распознанный текст с разметкой. Не добавляй блоков кода (```), пояснений или служебных сообщений."
+    )
+
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [
@@ -117,7 +132,7 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
                 "content": [
                     {
                         "type": "text",
-                        "text": "Распознай текст и математические формулы на изображении. Верни ТОЛЬКО распознанный текст без ваших комментариев.",
+                        "text": prompt,
                     },
                     {
                         "type": "image_url",
@@ -139,12 +154,21 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         )
         response.raise_for_status()
         data = response.json()
+        
+        if "choices" not in data or not data["choices"]:
+            raise RecognitionError("API OpenRouter вернул пустой ответ.")
+
         text = data["choices"][0]["message"]["content"].strip()
+        
+        # Удаляем форматирование кода, если нейросеть его добавила
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+        
     except Exception as e:
         raise RecognitionError(f"Ошибка при обращении к OpenRouter API: {e}") from e
 
-    if not text:
-        raise RecognitionError("OpenRouter не смог распознать текст на изображении.")
+    if not text or "User Safety" in text:
+        raise RecognitionError("Не удалось получить корректный ответ от модели. Проверьте OPENROUTER_MODEL в .env.")
 
     return text
 

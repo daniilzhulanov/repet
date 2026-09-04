@@ -104,7 +104,6 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-    # .strip() исключает случайные пробелы и символы переноса из .env
     api_key = OPENROUTER_API_KEY.strip()
     model_name = OPENROUTER_MODEL.strip()
 
@@ -143,12 +142,13 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         ],
     }
 
-    # Чистый URL без форматирования
-    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
+    # Жесткое зашивание чистого URL без скобок и разметки
+    raw_url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
+    clean_url = raw_url.replace("[", "").replace("]", "").split("(")[0].strip()
 
     try:
         response = requests.post(
-            url,
+            clean_url,
             headers=headers,
             json=payload,
             timeout=30,
@@ -161,11 +161,8 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
         text = data["choices"][0]["message"]["content"].strip()
         
-        # Удаление Markdown-блоков кода
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
-        
-        # Принудительная замена $$ на $
         text = text.replace("$$", "$")
         
     except Exception as e:

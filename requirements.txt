@@ -4,3 +4,4 @@ reportlab
 python-dotenv
 pytesseract
 Pillow
+requests

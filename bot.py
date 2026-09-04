@@ -29,12 +29,9 @@ Telegram-бот для сборки домашней работы и генер�
 
 НАСТРОЙКА
 ---------
-Базовый вариант — офлайн, без ИИ: классический OCR-движок Tesseract (не
-нейросеть/LLM) для фото и регулярные выражения для оформления формул в
-LaTeX/mathtext. Дополнительно можно включить оформление текста задания через
-нейросеть (OpenRouter) — она приводит текст к чистому виду и сама расставляет
-$...$ вокруг формул, заодно поправляя опечатки OCR; без ключа бот продолжает
-работать по regex-эвристике как раньше.
+Никаких ИИ/нейросетей и внешних API не используется — только классический
+OCR-движок Tesseract (обычная офлайн-программа распознавания символов, не
+нейросеть/LLM) для фото и регулярные выражения для оформления формул в LaTeX.
 
 1. Создайте бота через @BotFather в Telegram, получите токен.
 2. Установите Tesseract OCR (нужен для распознавания заданий с фото):
@@ -50,33 +47,17 @@ $...$ вокруг формул, заодно поправляя опечатк�
        TELEGRAM_BOT_TOKEN=123456:ABC-your-token
        # необязательно, если tesseract не в PATH:
        TESSERACT_CMD=C:/Program Files/Tesseract-OCR/tesseract.exe
-       # необязательно — включает оформление текста через нейросеть OpenRouter:
-       OPENROUTER_API_KEY=sk-or-v1-...
-       # необязательно, модель по умолчанию — бесплатный роутер OpenRouter:
-       OPENROUTER_MODEL=openrouter/free
 5. Запустите бота:
        python3 bot.py
 
 ВАЖНО про распознавание формул
 -------------------------------
-Если задан OPENROUTER_API_KEY, текст задания (введённый вручную или снятый
-OCR с фото) сначала прогоняется через нейросеть OpenRouter — она приводит
-его к чистому виду и оформляет формулы в $...$. Если ключ не задан, или
-запрос к нейросети не удался, используется прежний способ: формулы
-автоматически оборачиваются в $...$ по простым правилам (регулярные
+Формулы автоматически оформляются в $...$ по простым правилам (регулярные
 выражения ловят степени x^2, дроби 2/3, sqrt(x), <=, >=, !=, греческие буквы
-словами и т.п.). Нестандартную запись это может распознать неточно (особенно
-на фото, где ещё и OCR может ошибиться в символах). Перед отправкой финальных
-файлов список заданий всегда можно просмотреть и поправить кнопкой
-«✏️ Редактировать».
-
-ВАЖНО про API-ключ OpenRouter
--------------------------------
-Ключ OPENROUTER_API_KEY — секрет, как пароль. Никогда не публикуйте его в
-коде, репозитории или переписке. Храните только в .env (этот файл не должен
-попадать в git — добавьте его в .gitignore) или в переменных окружения
-хостинга. Если ключ где-то засветился — как можно скорее перевыпустите его в
-личном кабинете OpenRouter.
+словами и т.п.) — без какого-либо ИИ. Нестандартную запись это может
+распознать неточно (особенно на фото, где ещё и OCR может ошибиться в
+символах). Перед отправкой финальных файлов список заданий всегда можно
+просмотреть и поправить кнопкой «✏️ Редактировать».
 """
 
 import logging
@@ -86,7 +67,6 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()  # подхватывает переменные из файла .env, если он есть рядом со скриптом
@@ -109,8 +89,7 @@ from worksheet_generator import (
 )
 
 try:
-    import pytesseract
-    from PIL import Image, ImageOps
+        from PIL import Image, ImageOps
 
     _TESSERACT_CMD = os.environ.get("TESSERACT_CMD", "")
     if _TESSERACT_CMD:
@@ -124,15 +103,9 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-OCR_LANG = os.environ.get("OCR_LANG", "rus+eng")
-
-# Распознавание текста задания через нейросеть OpenRouter (опционально).
-# Если ключ не задан — бот продолжает работать по-старому (regex-эвристика).
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
-OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "")
-OPENROUTER_SITE_NAME = os.environ.get("OPENROUTER_SITE_NAME", "Repet Homework Bot")
-OPENROUTER_TIMEOUT = float(os.environ.get("OPENROUTER_TIMEOUT", "30"))
+OPENROUTER_API_KEY=os.environ.get("OPENROUTER_API_KEY","")
+OPENROUTER_MODEL=os.environ.get("OPENROUTER_MODEL","openrouter/free")
+import base64,requests,io
 
 # Режим подбора места под решение (см. worksheet_generator.resolve_space):
 GENERATION_MODE = "auto"
@@ -353,80 +326,8 @@ def _clean_recognized(text: str) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- #
-# Распознавание/оформление текста задания через нейросеть (OpenRouter)
-# --------------------------------------------------------------------------- #
-#
-# Необязательное улучшение поверх regex-эвристики выше: если задан
-# OPENROUTER_API_KEY, сырой текст (введённый вручную или полученный из OCR)
-# дополнительно прогоняется через LLM, которая приводит его к чистому виду и
-# аккуратно оформляет формулы в $...$ (mathtext), заодно поправляя опечатки
-# OCR. Если ключ не задан, или запрос к нейросети не удался (сеть, лимиты,
-# ошибка API) — используется обычный результат regex-эвристики, ничего не
-# ломается.
-
-_AI_SYSTEM_PROMPT = (
-    "Ты помогаешь оформлять текст школьного задания по математике для PDF-версии "
-    "тетрадного листа. Тебе дают сырой текст (может быть с опечатками OCR). "
-    "Верни ТОЛЬКО итоговый текст задания, без пояснений и без решения задачи:\n"
-    "- исправь очевидные опечатки распознавания (OCR), не меняя смысл и числа;\n"
-    "- заключи все математические выражения, формулы, степени, дроби, корни, "
-    "греческие буквы, знаки сравнения и т.п. в $...$ (синтаксис matplotlib mathtext: "
-    "например x^{2}, \\frac{a}{b}, \\sqrt{x}, \\leq, \\alpha);\n"
-    "- обычный текст условия оставь как есть, без разметки;\n"
-    "- не добавляй заголовков, номеров заданий, markdown-списков и своих комментариев;\n"
-    "- если текст уже похож на готовое условие без формул — верни его почти без изменений."
-)
-
-
-def ai_format_task(raw_text: str) -> str | None:
-    """Пытается привести текст задания к чистому виду через OpenRouter.
-    Возвращает None, если AI-распознавание недоступно или запрос не удался —
-    вызывающий код в этом случае просто использует обычную regex-эвристику."""
-    if not OPENROUTER_API_KEY or not raw_text.strip():
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    if OPENROUTER_SITE_URL:
-        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
-    if OPENROUTER_SITE_NAME:
-        headers["X-Title"] = OPENROUTER_SITE_NAME
-
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [
-            {"role": "system", "content": _AI_SYSTEM_PROMPT},
-            {"role": "user", "content": raw_text.strip()},
-        ],
-        "temperature": 0.1,
-    }
-
-    try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=OPENROUTER_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        content = content.strip().strip("`").strip()
-        return content or None
-    except Exception:
-        logger.exception("Не удалось получить ответ от OpenRouter, используем regex-эвристику")
-        return None
-
-
 def recognize_text_task(text: str) -> str:
-    ai_result = ai_format_task(text)
-    if ai_result:
-        result = _clean_recognized(ai_result)
-    else:
-        result = _clean_recognized(heuristic_to_mathtext(text))
+    result = _clean_recognized(heuristic_to_mathtext(text))
     if not result:
         raise RecognitionError("Пустой текст задания.")
     return result
@@ -434,11 +335,7 @@ def recognize_text_task(text: str) -> str:
 
 def recognize_image_task(image_bytes: bytes) -> str:
     raw_text = ocr_image(image_bytes)
-    ai_result = ai_format_task(raw_text)
-    if ai_result:
-        result = _clean_recognized(ai_result)
-    else:
-        result = _clean_recognized(heuristic_to_mathtext(raw_text))
+    result = _clean_recognized(heuristic_to_mathtext(raw_text))
     if not result:
         raise RecognitionError("Не удалось разобрать задание на фото.")
     return result

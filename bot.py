@@ -105,8 +105,9 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/telegram-bot",
     }
 
     prompt = (
@@ -116,14 +117,14 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         "2. Все математические выражения и формулы оборачивай СТРОГО В ОДИНАРНЫЕ ДОЛЛАРЫ: $...$.\n"         "3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать двойные доллары ($$). Используй ТОЛЬКО одинарные доллары ($).\n"
         "4. Синтаксис Matplotlib mathtext:\n"
         "   - Степени: $71^2$, $(-5,9)^3$\n"
-        "   - Дроби: $\\frac{a}{b}$\n"
+        "   - Дроби: \\frac{a}{b}\n"
         "   - Знаки умножения: \\cdot\n"
         "5. Запрещено использовать \\begin, \\end, \\align, \\matrix и блоки кода (```).\n"
         "6. Верни ТОЛЬКО распознанный текст."
     )
 
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": OPENROUTER_MODEL.strip(),
         "messages": [
             {
                 "role": "user",
@@ -138,9 +139,12 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         ],
     }
 
+    # Использование строго чистого URL без лишних кавычек и скобок
+    url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
+
     try:
         response = requests.post(
-            "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
+            url,
             headers=headers,
             json=payload,
             timeout=30,
@@ -153,11 +157,11 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
         text = data["choices"][0]["message"]["content"].strip()
         
-        # 1. Удаляем Markdown-блоки кода, если LLM их добавила
+        # Удаление блоков кода Markdown
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
         
-        # 2. ПРИНУДИТЕЛЬНО заменяем $$ на $ для Matplotlib
+        # Принудительная замена $$ на $
         text = text.replace("$$", "$")
         
     except Exception as e:

@@ -324,15 +324,6 @@ def recognize_text_task(text: str) -> str:
         raise RecognitionError("Пустой текст задания.")
     return result
 
-
-def recognize_image_task(image_bytes: bytes) -> str:
-    raw_text = recognize_image_via_openrouter(image_bytes)
-    result = _clean_recognized(heuristic_to_mathtext(raw_text))
-    if not result:
-        raise RecognitionError("Не удалось разобрать задание на фото.")
-    return result
-
-
 # --------------------------------------------------------------------------- #
 # Состояние диалога (хранится в context.user_data)
 # --------------------------------------------------------------------------- #

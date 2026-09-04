@@ -104,8 +104,12 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
+    # .strip() исключает случайные пробелы и символы переноса из .env
+    api_key = OPENROUTER_API_KEY.strip()
+    model_name = OPENROUTER_MODEL.strip()
+
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/telegram-bot",
     }
@@ -124,7 +128,7 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
     )
 
     payload = {
-        "model": OPENROUTER_MODEL.strip(),
+        "model": model_name,
         "messages": [
             {
                 "role": "user",
@@ -139,7 +143,7 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         ],
     }
 
-    # Использование строго чистого URL без лишних кавычек и скобок
+    # Чистый URL без форматирования
     url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
 
     try:
@@ -157,7 +161,7 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
         text = data["choices"][0]["message"]["content"].strip()
         
-        # Удаление блоков кода Markdown
+        # Удаление Markdown-блоков кода
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
         
@@ -171,7 +175,6 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         raise RecognitionError("Не удалось получить корректный ответ от модели. Проверьте OPENROUTER_MODEL в .env.")
 
     return text
-
 
 def recognize_image_task(image_bytes: bytes) -> str:
     raw_text = recognize_image_via_openrouter(image_bytes)

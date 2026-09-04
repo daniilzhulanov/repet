@@ -12,64 +12,41 @@ Telegram-бот для сборки домашней работы и генер�
    -----------------------------------
    /start -> кнопка «🆕 Новая домашка» -> бот просит прислать первое задание.
    Задание можно прислать текстом ИЛИ фото (фото условия из учебника/тетради).
-   Бот распознаёт текст, сам находит формулы и оформляет их в LaTeX-подобном
-   виде ($...$, mathtext), добавляет задание в список. Так можно добавить
-   сколько угодно заданий подряд.
+   Бот распознаёт текст через OpenRouter API, оформляет его в LaTeX-подобном
+   виде ($...$, mathtext) и добавляет задание в список.
    Когда всё добавлено — кнопка «✅ Завершить»: бот присылает список всех
-   распознанных заданий, каждое можно отредактировать (прислать заново текст
-   или фото — старая версия задания заменится) или подтвердить всё сразу.
-   После подтверждения бот генерирует и присылает .md файл со всеми заданиями
-   и готовый .pdf («тетрадный лист» с местом под решение).
+   распознанных заданий, каждое можно отредактировать или подтвердить.
+   После подтверждения бот генерирует и присылает .md файл и готовый .pdf.
 
-2) ЗАГРУЗКА ГОТОВОГО .md ФАЙЛА (как раньше)
-   -------------------------------------------
-   Можно просто прислать боту документом .md файл с заданиями (формат описан
-   в worksheet_generator.py) — в ответ придёт PDF. Так удобно, если файл с
-   заданиями уже готов и не нужно собирать его через диалог.
+2) ЗАГРУЗКА ГОТОВОГО .md ФАЙЛА
+   ---------------------------
+   Можно прислать боту документом .md файл с заданиями — в ответ придёт PDF.
 
 НАСТРОЙКА
 ---------
-Никаких ИИ/нейросетей и внешних API не используется — только классический
-OCR-движок Tesseract (обычная офлайн-программа распознавания символов, не
-нейросеть/LLM) для фото и регулярные выражения для оформления формул в LaTeX.
-
 1. Создайте бота через @BotFather в Telegram, получите токен.
-2. Установите Tesseract OCR (нужен для распознавания заданий с фото):
-       Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-rus
-       Windows: https://github.com/UB-Mannheim/tesseract/wiki
-       macOS:   brew install tesseract tesseract-lang
-   Если распознавать задания только текстом (без фото) — Tesseract не
-   обязателен, бот тогда просто откажет в приёме фото с понятным сообщением.
+2. Получите API ключ OpenRouter: https://openrouter.ai/
 3. Установите Python-зависимости:
        pip install -r requirements.txt
-4. Задайте переменные окружения (через .env рядом с bot.py, файл
-   подхватывается автоматически):
+4. Задайте переменные окружения в .env:
        TELEGRAM_BOT_TOKEN=123456:ABC-your-token
-       # необязательно, если tesseract не в PATH:
-       TESSERACT_CMD=C:/Program Files/Tesseract-OCR/tesseract.exe
+       OPENROUTER_API_KEY=sk-or-v1-...
+       OPENROUTER_MODEL=google/gemini-2.5-flash # или любая другая мультимодальная модель
 5. Запустите бота:
        python3 bot.py
-
-ВАЖНО про распознавание формул
--------------------------------
-Формулы автоматически оформляются в $...$ по простым правилам (регулярные
-выражения ловят степени x^2, дроби 2/3, sqrt(x), <=, >=, !=, греческие буквы
-словами и т.п.) — без какого-либо ИИ. Нестандартную запись это может
-распознать неточно (особенно на фото, где ещё и OCR может ошибиться в
-символах). Перед отправкой финальных файлов список заданий всегда можно
-просмотреть и поправить кнопкой «✏️ Редактировать».
 """
 
+import base64
 import logging
 import os
 import re
 import tempfile
-from io import BytesIO
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 
-load_dotenv()  # подхватывает переменные из файла .env, если он есть рядом со скриптом
+load_dotenv()
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
@@ -88,30 +65,18 @@ from worksheet_generator import (
     parse_markdown,
 )
 
-try:
-        from PIL import Image, ImageOps
-
-    _TESSERACT_CMD = os.environ.get("TESSERACT_CMD", "")
-    if _TESSERACT_CMD:
-        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
-except ImportError:
-    pytesseract = None
-    Image = None
-
 # --------------------------------------------------------------------------- #
 # Настройки
 # --------------------------------------------------------------------------- #
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-OPENROUTER_API_KEY=os.environ.get("OPENROUTER_API_KEY","")
-OPENROUTER_MODEL=os.environ.get("OPENROUTER_MODEL","openrouter/free")
-import base64,requests,io
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 
-# Режим подбора места под решение (см. worksheet_generator.resolve_space):
 GENERATION_MODE = "auto"
 DEFAULT_SPACE_CM = 5.0
 
-MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 МБ — лимит на входной .md
+MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
 DEFAULT_HEADING = "Домашняя работа"
 PREVIEW_LEN = 90
 
@@ -127,64 +92,65 @@ class RecognitionError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
-# OCR фото (Tesseract — классический движок, не нейросеть/LLM)
+# Распознавание фото через OpenRouter API
 # --------------------------------------------------------------------------- #
 
-OCR_MAX_SIDE = 2200      # верхний предел стороны после апскейла, px
-OCR_MIN_UPSCALE_SIDE = 1600  # если фото меньше — увеличиваем
-
-
-def _preprocess_for_ocr(image: "Image.Image") -> "Image.Image":
-    """Убираем альфа-канал, переводим в градации серого, увеличиваем мелкие
-    фото и повышаем контраст — Tesseract на таких фото ошибается заметно
-    меньше, особенно на телефонных снимках учебника/тетради."""
-    if image.mode not in ("L", "RGB"):
-        image = image.convert("RGB")
-    gray = ImageOps.grayscale(image)
-
-    w, h = gray.size
-    longest = max(w, h)
-    if longest < OCR_MIN_UPSCALE_SIDE:
-        scale = min(4, max(2, OCR_MAX_SIDE // max(longest, 1)))
-        gray = gray.resize((w * scale, h * scale), Image.LANCZOS)
-
-    gray = ImageOps.autocontrast(gray)
-    return gray
-
-
-def ocr_image(image_bytes: bytes) -> str:
-    if pytesseract is None or Image is None:
+def recognize_image_via_openrouter(image_bytes: bytes) -> str:
+    if not OPENROUTER_API_KEY:
         raise RecognitionError(
-            "Для распознавания фото нужен pytesseract и установленный Tesseract OCR "
-            "(см. инструкцию в начале bot.py). Пришлите задание текстом либо "
-            "установите Tesseract."
+            "Не задан OPENROUTER_API_KEY. Настройте переменную окружения "
+            "для обработки изображений."
         )
+
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Распознай текст и математические формулы на изображении. Верни ТОЛЬКО распознанный текст без ваших комментариев.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
     try:
-        image = Image.open(BytesIO(image_bytes))
-        image = _preprocess_for_ocr(image)
-        # psm 6 = «единый блок текста» — на структурированных заданиях (в т.ч.
-        # с несколькими пунктами в строку) даёт более предсказуемый порядок
-        # строк, чем автоматический разбор колонок/блоков (psm 3 по умолчанию).
-        text = pytesseract.image_to_string(image, lang=OCR_LANG, config="--psm 6")
-    except pytesseract.TesseractNotFoundError as e:
-        raise RecognitionError(
-            "Tesseract OCR не найден в системе. Установите его (см. инструкцию "
-            "в начале bot.py) или пришлите задание текстом."
-        ) from e
-    except Exception as e:
-        raise RecognitionError(f"Не получилось распознать фото: {e}") from e
-
-    text = text.strip()
-    if not text:
-        raise RecognitionError(
-            "Не удалось разобрать текст на фото — попробуйте более чёткое/ровное "
-            "фото или пришлите задание текстом."
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
         )
+        response.raise_for_status()
+        data = response.json()
+        text = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        raise RecognitionError(f"Ошибка при обращении к OpenRouter API: {e}") from e
+
+    if not text:
+        raise RecognitionError("OpenRouter не смог распознать текст на изображении.")
+
     return text
 
 
 # --------------------------------------------------------------------------- #
-# Оформление формул в $...$ по регулярным выражениям (без ИИ)
+# Оформление формул в $...$ по регулярным выражениям
 # --------------------------------------------------------------------------- #
 
 _GREEK_WORDS = {
@@ -207,16 +173,13 @@ _PLAIN_NUMBER_RE = re.compile(r'^[+\-]?\d+([.,]\d+)?$')
 
 
 def _strip_edges(word: str):
-    """Отделяет обрамляющую пунктуацию от 'ядра' слова. Скобки не срезает,
-    если они образуют парную пару внутри самого слова (например, «(-5,9)3»
-    или «sqrt(2)») — иначе ломается математическое выражение целиком."""
     lead_end = 0
     while lead_end < len(word) and word[lead_end] in _LEAD_CHARS:
         ch = word[lead_end]
         if ch == "(":
             candidate = word[lead_end + 1:]
             if candidate.count(")") > candidate.count("("):
-                break  # эта '(' закрывается позже в этом же слове — не срезаем
+                break
         lead_end += 1
 
     trail_start = len(word)
@@ -225,7 +188,7 @@ def _strip_edges(word: str):
         if ch == ")":
             candidate = word[lead_end:trail_start - 1]
             if candidate.count("(") > candidate.count(")"):
-                break  # эта ')' закрывает '(' внутри ядра — не срезаем
+                break
         trail_start -= 1
 
     return word[:lead_end], word[lead_end:trail_start], word[trail_start:]
@@ -238,7 +201,7 @@ def _is_math_core(core: str) -> bool:
     if core_l in _GREEK_WORDS or "sqrt" in core_l:
         return True
     if _PLAIN_NUMBER_RE.match(core):
-        return False  # просто число само по себе не выделяем
+        return False
     has_op = any(ch in _OP_CHARS for ch in core)
     has_alnum = any(ch.isalnum() for ch in core)
     return has_op and has_alnum
@@ -248,25 +211,17 @@ def _convert_math_core(core: str) -> str:
     core_l = core.lower()
     if core_l in _GREEK_WORDS:
         return _GREEK_WORDS[core_l]
-    # sqrt(...) и sqrt x -> \sqrt{...}
     core = re.sub(r"[Ss][Qq][Rr][Tt]\(([^()]*)\)", r"\\sqrt{\1}", core)
     core = re.sub(r"[Ss][Qq][Rr][Tt]\s*([0-9A-Za-zА-Яа-яёЁ]+)", r"\\sqrt{\1}", core)
-    # простая числовая дробь a/b -> \frac{a}{b}
     core = re.sub(r"(?<![\d\\])(\d+)/(\d+)(?!\d)", r"\\frac{\1}{\2}", core)
-    # многосимвольные степени/индексы -> в фигурные скобки (mathtext требует {})
     core = re.sub(r"\^(\w{2,})", r"^{\1}", core)
     core = re.sub(r"(?<!\^)_(\w{2,})", r"_{\1}", core)
-    # операторы сравнения и умножение
     core = core.replace("<=", r"\leq").replace(">=", r"\geq").replace("!=", r"\neq")
     core = re.sub(r"(?<=[0-9A-Za-zА-Яа-яёЁ)])\*(?=[0-9A-Za-zА-Яа-яёЁ(])", r"\\cdot ", core)
     return core
 
 
 def heuristic_to_mathtext(text: str) -> str:
-    """Оборачивает похожие на формулы участки текста в $...$ по regex-правилам
-    (степени, дроби, sqrt, знаки сравнения, греческие буквы словами) — без
-    какого-либо ИИ. Соседние «математические» слова, разделённые пробелом,
-    объединяются в один блок $...$."""
     if not text.strip():
         return text
 
@@ -334,7 +289,7 @@ def recognize_text_task(text: str) -> str:
 
 
 def recognize_image_task(image_bytes: bytes) -> str:
-    raw_text = ocr_image(image_bytes)
+    raw_text = recognize_image_via_openrouter(image_bytes)
     result = _clean_recognized(heuristic_to_mathtext(raw_text))
     if not result:
         raise RecognitionError("Не удалось разобрать задание на фото.")
@@ -346,7 +301,6 @@ def recognize_image_task(image_bytes: bytes) -> str:
 # --------------------------------------------------------------------------- #
 
 def _hw(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    """Возвращает (создавая при необходимости) состояние текущей сборки дз."""
     if "hw" not in context.user_data:
         context.user_data["hw"] = {"state": None, "tasks": [], "edit_index": None}
     return context.user_data["hw"]
@@ -629,7 +583,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     try:
-        photo = update.message.photo[-1]  # самое большое разрешение
+        photo = update.message.photo[-1]
         tg_file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await tg_file.download_as_bytearray())
         body = recognize_image_task(image_bytes)
@@ -660,7 +614,6 @@ async def _task_recognized(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         )
         return
 
-    # state == "collecting"
     hw["tasks"].append(body)
     idx = len(hw["tasks"])
     await update.message.reply_text(
@@ -671,7 +624,7 @@ async def _task_recognized(update: Update, context: ContextTypes.DEFAULT_TYPE, b
 
 
 # --------------------------------------------------------------------------- #
-# Загрузка готового .md файла (старый сценарий)
+# Загрузка готового .md файла
 # --------------------------------------------------------------------------- #
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -749,24 +702,12 @@ async def handle_wrong_message(update: Update, context: ContextTypes.DEFAULT_TYP
 def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit(
-            "Не задан токен бота. Создайте файл .env рядом с bot.py со строкой "
-            "TELEGRAM_BOT_TOKEN=ваш_токен, либо установите переменную окружения "
-            "TELEGRAM_BOT_TOKEN."
+            "Не задан токен бота. Задайте переменную TELEGRAM_BOT_TOKEN в .env"
         )
-    if pytesseract is None:
+    if not OPENROUTER_API_KEY:
         logger.warning(
-            "pytesseract/Pillow не установлены — распознавание заданий по фото "
-            "работать не будет (текстовые задания и загрузка .md продолжат работать)."
+            "OPENROUTER_API_KEY не задан — обработка изображений работать не будет!"
         )
-    else:
-        try:
-            pytesseract.get_tesseract_version()
-        except Exception:
-            logger.warning(
-                "Не найден исполняемый файл Tesseract OCR — распознавание фото "
-                "работать не будет. Установите Tesseract (см. инструкцию в начале "
-                "bot.py) или задайте TESSERACT_CMD."
-            )
 
     app = Application.builder().token(BOT_TOKEN).build()
 

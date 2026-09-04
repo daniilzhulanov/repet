@@ -114,16 +114,17 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
     }
 
     prompt = (
-        "Распознай текст и математические задания с изображения.\n\n"
-        "СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ:\n"
-        "1. Перепиши текст и буквы пунктов (а, б, в, г).\n"
-        "2. Все математические выражения и формулы оборачивай СТРОГО В ОДИНАРНЫЕ ДОЛЛАРЫ: $...$.\n"         "3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать двойные доллары ($$). Используй ТОЛЬКО одинарные доллары ($).\n"
-        "4. Синтаксис Matplotlib mathtext:\n"
-        "   - Степени: $71^2$, $(-5,9)^3$\n"
-        "   - Дроби: \\frac{a}{b}\n"
-        "   - Знаки умножения: \\cdot\n"
-        "5. Запрещено использовать \\begin, \\end, \\align, \\matrix и блоки кода (```).\n"
-        "6. Верни ТОЛЬКО распознанный текст."
+        "Распознай текст и математические выражения с изображения.\n\n"
+        "СТРОГИЕ ПРАВИЛА ДЛЯ ПАРСЕРА PYTHON MATPLOTLIB (mathtext):\n"
+        "1. Распознай весь обычный текст и пункты (а, б, в, г).\n"
+        "2. Все математические выражения и формулы оберни В ЕДИНЫЙ БЛОК в одинарных долларах: $выражение$.\n"
+        "3. ЗАПРЕЩЕНО разбивать одно выражение на несколько долларовых блоков. Например:\n"
+        "   - НЕПРАВИЛЬНО: $0,15(x$ - 4) = 9,9 - $0,3(x$ - $1)$\n"
+        "   - ПРАВИЛЬНО: $0.15(x - 4) = 9.9 - 0.3(x - 1)$\n"         "4. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать двойные доллары ($$). Используй ТОЛЬКО одинарные ($).\n"
+        "5. Числа с отрицательным знаком или степенями внутри текста оборачивай целиком: $-5$, $71^2$, $(-5.9)^3$.\n"
+        "6. Используй базовый синтаксис: \\frac{a}{b} для дробей, \\cdot для умножения, \\sqrt{x} для корней.\n"
+        "7. НЕ ИСПОЛЬЗУЙ \\begin, \\end, \\align, \\matrix, \\text{} и блоки кода (```).\n"
+        "8. Верни ТОЛЬКО чистый распознанный текст без комментариев."
     )
 
     payload = {
@@ -142,7 +143,6 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         ],
     }
 
-    # Жесткое зашивание чистого URL без скобок и разметки
     raw_url = "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)"
     clean_url = raw_url.replace("[", "").replace("]", "").split("(")[0].strip()
 
@@ -156,11 +156,13 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
         response.raise_for_status()
         data = response.json()
         
-        if "choices" not in data or not data["choices"]:
+        choices = data.get("choices", [])
+        if not choices or not choices[0].get("message", {}).get("content"):
             raise RecognitionError("API OpenRouter вернул пустой ответ.")
 
-        text = data["choices"][0]["message"]["content"].strip()
+        text = choices[0]["message"]["content"].strip()
         
+        # Очистка форматирования
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
         text = text.replace("$$", "$")

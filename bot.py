@@ -111,17 +111,15 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     prompt = (
         "Распознай текст и математические задания с изображения.\n\n"
-        "ВАЖНОЕ ТРЕБОВАНИЕ К ФОРМАТИРОВАНИЮ:\n"
-        "Результат будет рендериться через Python Matplotlib (mathtext).\n"
-        "1. Распознай весь текст и буквы пунктов (а, б, в, г и т.д.).\n"
-        "2. Все математические выражения, числа со степенями, скобки с числами оборачивай в $...$.\n"
-        "3. Используй ТОЛЬКО базовый LaTeX-синтаксис, совместимый с Python mathtext:\n"
-        "   - Степени: $71^2$, $(-5,9)^3$, $x^{12}$\n"
+        "СТРОГИЕ ПРАВИЛА ФОРМАТИРОВАНИЯ:\n"
+        "1. Перепиши текст и буквы пунктов (а, б, в, г).\n"
+        "2. Все математические выражения и формулы оборачивай СТРОГО В ОДИНАРНЫЕ ДОЛЛАРЫ: $...$.\n"         "3. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать двойные доллары ($$). Используй ТОЛЬКО одинарные доллары ($).\n"
+        "4. Синтаксис Matplotlib mathtext:\n"
+        "   - Степени: $71^2$, $(-5,9)^3$\n"
         "   - Дроби: $\\frac{a}{b}$\n"
-        "   - Умножение: \\cdot вместо *\n"
-        "   - Корни: \\sqrt{x}\n"
-        "4. НЕ ИСПОЛЬЗУЙ сложные окружения LaTeX (такие как \\begin{align}, \\begin{matrix}, \\begin{array}).\n"
-        "5. Верни ТОЛЬКО готовый распознанный текст с разметкой. Не добавляй блоков кода (```), пояснений или служебных сообщений."
+        "   - Знаки умножения: \\cdot\n"
+        "5. Запрещено использовать \\begin, \\end, \\align, \\matrix и блоки кода (```).\n"
+        "6. Верни ТОЛЬКО распознанный текст."
     )
 
     payload = {
@@ -130,15 +128,10 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    },
+                    {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        },
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                     },
                 ],
             }
@@ -147,7 +140,7 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     try:
         response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            "[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)",
             headers=headers,
             json=payload,
             timeout=30,
@@ -160,9 +153,12 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
         text = data["choices"][0]["message"]["content"].strip()
         
-        # Удаляем форматирование кода, если нейросеть его добавила
+        # 1. Удаляем Markdown-блоки кода, если LLM их добавила
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
+        
+        # 2. ПРИНУДИТЕЛЬНО заменяем $$ на $ для Matplotlib
+        text = text.replace("$$", "$")
         
     except Exception as e:
         raise RecognitionError(f"Ошибка при обращении к OpenRouter API: {e}") from e
@@ -172,6 +168,17 @@ def recognize_image_via_openrouter(image_bytes: bytes) -> str:
 
     return text
 
+
+def recognize_image_task(image_bytes: bytes) -> str:
+    raw_text = recognize_image_via_openrouter(image_bytes)
+    
+    # Больше НЕ вызываем heuristic_to_mathtext для результатов LLM, 
+    # чтобы предотвратить двойное оборачивание в доллары.
+    result = _clean_recognized(raw_text)
+    
+    if not result:
+        raise RecognitionError("Не удалось разобрать задание на фото.")
+    return result
 
 # --------------------------------------------------------------------------- #
 # Оформление формул в $...$ по регулярным выражениям

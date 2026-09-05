@@ -293,28 +293,27 @@ def _text_width_in(s: str, font_size: float) -> float:
 
 
 def wrap_task_text(text: str, max_width_in: float, font_size: float) -> str:
-    """Перенос строк по фактической ширине текста, не разбивая формулы $...$."""
+    """Перенос строк по фактической ширине текста, не разбивая формулы $...$.
+    Каждый Enter из исходного .md сохраняется как отдельная строка."""
     text = _md_inline_to_mathtext(text)
-    paragraphs = text.split("\n\n")
-    out_paragraphs = []
-
-    for para in paragraphs:
-        para = para.replace("\n", " ")
-        tokens = re.findall(r"\$[^$]+\$|\S+", para)
-        lines = []
+    source_lines = text.split("\n")
+    out_lines = []
+    for line in source_lines:
+        tokens = re.findall(r"\$[^$]+\$|\S+", line)
+        if not tokens:
+            out_lines.append("")
+            continue
         cur_tokens: list[str] = []
         for tok in tokens:
             candidate = " ".join(cur_tokens + [tok])
             if cur_tokens and _text_width_in(candidate, font_size) > max_width_in:
-                lines.append(" ".join(cur_tokens))
+                out_lines.append(" ".join(cur_tokens))
                 cur_tokens = [tok]
             else:
                 cur_tokens.append(tok)
         if cur_tokens:
-            lines.append(" ".join(cur_tokens))
-        out_paragraphs.append("\n".join(lines))
-
-    return "\n\n".join(out_paragraphs)
+            out_lines.append(" ".join(cur_tokens))
+    return "\n".join(out_lines)
 
 
 TITLE_BODY_GAP_CM = 0.15  # маленький отступ между "Задание N" и текстом условия
